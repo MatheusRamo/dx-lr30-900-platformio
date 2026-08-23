@@ -21,12 +21,13 @@ Ultimo build de referencia:
 
 | Recurso | Uso | Disponivel |
 | --- | ---: | ---: |
-| Flash | 16.324 bytes (24,9%) | 64 KiB |
-| RAM | 3.208 bytes (15,7%) | 20 KiB |
+| Flash | 20.096 bytes (30,7%) | 64 KiB |
+| RAM | 3.588 bytes (17,5%) | 20 KiB |
 
 ## Funcionalidades
 
-- Radio LoRa em 915 MHz com parametros configuraveis.
+- Radio LoRa em 915 MHz com parametros configuraveis em tempo de execucao.
+- Interface de comandos `AT+` pela UART, sem persistencia em Flash.
 - Ponte bidirecional UART para LoRa.
 - Recepcao UART por interrupcao, byte a byte.
 - Empacotamento por inatividade da UART ou limite de 255 bytes.
@@ -43,7 +44,9 @@ Ultimo build de referencia:
 flowchart LR
     PC[Dispositivo serial] -->|UART 9600 8N1| UART[USART1]
     UART --> BUFFER[Buffer e fila circular]
-    BUFFER --> RADIO[SX1262 / LLCC68]
+    BUFFER --> CHECK{Inicia com AT+?}
+    CHECK -->|Nao| RADIO[SX1262 / LLCC68]
+    CHECK -->|Sim| CONFIG[Parser e configuracao local]
     RADIO -->|LoRa 915 MHz| AIR[Enlace RF]
     AIR --> RADIO
     RADIO -->|DIO1 / EXTI| IRQ[Processamento de IRQ]
@@ -120,8 +123,8 @@ Compartilhe o GND entre placa, ST-Link e adaptador UART.
 
 ## Configuracao LoRa padrao
 
-Os parametros principais ficam em `LR_driver/UserConfig.h` e na funcao
-`LoraInit()` de `LR_driver/UserConfig.c`.
+Os valores padrao ficam em `LR_driver/UserConfig.h`. A configuracao ativa fica
+em `g_lora_config` e e aplicada ao radio por `LoRaApplyConfig()`.
 
 | Parametro | Valor atual |
 | --- | --- |
@@ -151,8 +154,9 @@ coding rate, formato de header, CRC, IQ e preambulo.
 
 ### Transmissao UART para LoRa
 
-Com `TEST` igual a `0`, todo bloco recebido na USART1 e enviado como payload
-LoRa. Nao existe um protocolo de comandos adicional.
+Com `TEST` igual a `0`, todo bloco recebido na USART1 que **nao** comeca
+exatamente com `AT+` e enviado como payload LoRa. Blocos iniciados por `AT+`
+sao comandos locais e nunca sao transmitidos pelo radio.
 
 Um bloco e fechado quando ocorre uma destas condicoes:
 
@@ -169,6 +173,71 @@ Ola LoRa!
 ```
 
 O conteudo desse bloco sera usado diretamente como payload do pacote LoRa.
+Os bytes de payload normal nao sao aparados nem alterados pelo parser.
+
+### UART Command Interface
+
+A interface usa a mesma USART1 em **9600 8N1**. Cada comando deve ser enviado
+como um unico bloco UART. `CR`, `LF`, espacos e tabulacoes no final sao removidos
+somente dos comandos `AT+`; isso permite usar terminais configurados com
+terminadores `CR`, `LF` ou `CRLF`.
+
+As alteracoes valem imediatamente, mas permanecem apenas na RAM. Reiniciar o
+STM32 restaura os valores padrao. Antes de alterar o SX1262, o firmware valida o
+valor. Para uma alteracao valida, ele salva a configuracao anterior, coloca o
+radio em standby, aplica todo o perfil e retorna ao RX. Se a API do radio falhar,
+o firmware restaura e reaplica o perfil anterior.
+
+| Comando | Valores aceitos | Exemplo de resposta |
+| --- | --- | --- |
+| `AT+STATUS` | - | `STATUS|FREQ=915000000|BW=125000|SF=9|CR=6|POWER=22|PREAMBLE=8|CRC=0` |
+| `AT+FREQ=<Hz>` | 850000000 a 930000000 | `OK|FREQ=915000000` |
+| `AT+BW=<Hz>` | 125000, 250000 ou 500000 | `OK|BW=250000` |
+| `AT+SF=<valor>` | 5 a 12 | `OK|SF=7` |
+| `AT+CR=<denominador>` | 5, 6, 7 ou 8 | `OK|CR=5` |
+| `AT+POWER=<dBm>` | -9 a 22 | `OK|POWER=10` |
+| `AT+PREAMBLE=<simbolos>` | 4 a 65535 | `OK|PREAMBLE=8` |
+| `AT+CRC=<estado>` | 0 (OFF) ou 1 (ON) | `OK|CRC=1` |
+| `AT+DEFAULTS` | - | `OK|DEFAULTS=1` |
+
+No comando `AT+CR`, os valores 5, 6, 7 e 8 representam respectivamente 4/5,
+4/6, 4/7 e 4/8. O LDRO nao e configurado pela UART: ele e calculado
+automaticamente pela duracao do simbolo e ativado quando `Tsym >= 16,384 ms`.
+
+Exemplos de erro:
+
+```text
+ERR|CMD=SF|CODE=INVALID_VALUE
+ERR|CMD=UNKNOWN
+ERR|CMD=SF|CODE=RADIO_ERROR
+```
+
+`RADIO_ERROR` indica que o novo perfil nao foi aceito pelo radio e que o
+firmware voltou ao anterior. `ROLLBACK_FAILED` indica uma falha adicional ao
+reaplicar o perfil anterior e exige verificacao do hardware/SPI.
+
+Exemplo de sessao:
+
+```text
+AT+STATUS
+STATUS|FREQ=915000000|BW=125000|SF=9|CR=6|POWER=22|PREAMBLE=8|CRC=0
+AT+SF=7
+OK|SF=7
+AT+SF=20
+ERR|CMD=SF|CODE=INVALID_VALUE
+Mensagem 123
+```
+
+O ultimo bloco continua sendo transmitido de forma transparente. No outro
+radio, quando os parametros RF forem compativeis, a saida permanece:
+
+```text
+RX|RSSI=-67|SNR=8|DATA=Mensagem 123
+```
+
+Para comprovar a alteracao fisica, configure dois radios em SF9/BW125 e teste o
+enlace. Altere apenas o radio A com `AT+SF=7`: a comunicacao deve parar. Aplique
+`AT+SF=7` ao radio B: a comunicacao deve voltar.
 
 ### Recepcao LoRa para UART
 
@@ -362,28 +431,12 @@ Retorne para `release` antes de gerar o firmware de distribuicao.
 
 ## Personalizacao
 
-### Alterar a frequencia
+### Alterar os valores LoRa padrao
 
-Edite `LR_driver/UserConfig.h`:
-
-```c
-#define LORA_FRE 915000000
-```
-
-O valor esta em hertz. Recompile os dois lados do enlace com configuracoes
-compativeis.
-
-### Alterar parametros LoRa
-
-Edite a funcao `LoraInit()` em `LR_driver/UserConfig.c`:
-
-```c
-params.bw = SX126X_LORA_BW_125;
-params.sf = SX126X_LORA_SF9;
-params.cr = SX126X_LORA_CR_4_6;
-```
-
-Revise tambem preambulo, CRC, header, IQ, potencia e ramp time.
+Edite as macros `LORA_DEFAULT_*` em `LR_driver/UserConfig.h` e recompile. Para
+alteracoes temporarias, use a [UART Command Interface](#uart-command-interface),
+sem recompilar ou regravar o STM32. Os dois lados do enlace precisam manter
+frequencia, bandwidth, SF, CR, preambulo e CRC compativeis.
 
 ### Alterar o baud rate
 

@@ -6,6 +6,9 @@
 #define __USER_CONFIG_H
 
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "myqueue.h"
 #include "sx126x.h"
 
@@ -61,8 +64,16 @@
 
 
 
-#define LORA_FRE									915000000	// frequency
-#define LORA_PREAMBLE_LENGTH                        8        // PREAMBLE LENGTH
+#define LORA_DEFAULT_FREQUENCY_HZ                     915000000UL
+#define LORA_DEFAULT_BANDWIDTH_HZ                     125000UL
+#define LORA_DEFAULT_SPREADING_FACTOR                 9U
+#define LORA_DEFAULT_CODING_RATE                      6U
+#define LORA_DEFAULT_TX_POWER_DBM                     22
+#define LORA_DEFAULT_PREAMBLE_LENGTH                  8U
+#define LORA_DEFAULT_CRC_ENABLED                      false
+
+/* Kept for the existing boot banner and CW test mode. */
+#define LORA_FRE                                      ((int)LORA_DEFAULT_FREQUENCY_HZ)
 #define LORA_SX126x_SYMBOL_TIMEOUT                  0         // Symbols(SX126x)
 #define LORA_FIX_LENGTH_PAYLOAD_ON                  false			// PAYLOAD FIX LENGTH
 #define LORA_IQ_INVERSION_ON                        false			// IQ INVERSION
@@ -70,6 +81,17 @@
 
 
 #define SIZE_DATA  255
+
+typedef struct
+{
+    uint32_t frequency_hz;
+    uint32_t bandwidth_hz;
+    uint8_t spreading_factor;
+    uint8_t coding_rate;
+    int8_t tx_power_dbm;
+    uint16_t preamble_length;
+    bool crc_enabled;
+} LoRaConfig_t;
 
 
 
@@ -104,6 +126,7 @@ extern uint8_t IrqFired;
 extern sx126x_irq_mask_t radioFlag;
 extern sx126x_rx_buffer_status_t offset;
 extern sx126x_pkt_status_lora_t RadioPktStatus;
+extern LoRaConfig_t g_lora_config;
 
 
 
@@ -114,6 +137,7 @@ extern sx126x_pkt_status_lora_t RadioPktStatus;
 extern void Data_Processing(void);
 
 extern void LoraInit(void);
+extern bool LoRaApplyConfig(void);
 
 extern void gpio_init(void);
 
