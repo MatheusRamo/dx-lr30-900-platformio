@@ -1,0 +1,10 @@
+{
+  "name": "rtk-field-report-tests",
+  "private": true,
+  "scripts": {
+    "test": "node field_page_test.cjs && node field_storage_test.cjs"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.5"
+  }
+}
