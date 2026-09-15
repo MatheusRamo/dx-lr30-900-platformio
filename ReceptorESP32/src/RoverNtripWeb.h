@@ -107,10 +107,12 @@ static bool readField(const char *name,char *dest,size_t size,bool keepEmpty=fal
 static void setupNtrip() {
     Preferences p; p.begin("rover-ntrip",true);
     const bool stored = p.getBytesLength("config")==sizeof(ntripConfig);
+    const bool firstTestBoot = !p.getBool("test_defaults_v1", false);
+    const bool storedDirect = p.getBool("direct", false);
     if(stored) p.getBytes("config",&ntripConfig,sizeof(ntripConfig));
     // Always bound persisted strings before validating/using them.
     ntripConfig.ssid[32]=ntripConfig.wifiPass[63]=ntripConfig.host[127]=ntripConfig.mount[127]=ntripConfig.user[95]=ntripConfig.password[95]=0;
-    if(!stored || !*ntripConfig.host) {
+    if(firstTestBoot || !stored || !*ntripConfig.host) {
         strlcpy(ntripConfig.host, TEST_NTRIP_HOST, sizeof(ntripConfig.host));
         ntripConfig.port = TEST_NTRIP_PORT;
         strlcpy(ntripConfig.mount, TEST_NTRIP_MOUNT, sizeof(ntripConfig.mount));
@@ -118,11 +120,22 @@ static void setupNtrip() {
         strlcpy(ntripConfig.password, TEST_NTRIP_PASSWORD, sizeof(ntripConfig.password));
         Serial.println("NTRIP: defaults de teste carregados; configure SSID Wi-Fi via Bluetooth.");
     }
-    if(p.getBool("direct",false) && configValid(ntripConfig)) {
+    p.end();
+    if(firstTestBoot) {
+        // Persist the requested test caster once, while forcing the new
+        // installation to start in LoRa until the operator selects MODE=2.
+        const CorrectionInput::Source previous = corrections.source;
+        corrections.source = CorrectionInput::LORA;
+        saveNtripConfig();
+        corrections.source = previous;
+        Preferences mark;
+        if(mark.begin("rover-ntrip", false)) { mark.putBool("test_defaults_v1", true); mark.end(); }
+    }
+    if(!firstTestBoot && storedDirect && configValid(ntripConfig)) {
         ntripWorkerReady=directNtrip.begin();
         if(ntripWorkerReady) corrections.source=CorrectionInput::NTRIP;
     }
-    p.end(); applyCorrectionSource();
+    applyCorrectionSource();
     web.on("/corrections/config",HTTP_GET,[] {
         String s="{\"source\":"+jsonText(corrections.name());
         s+=",\"ssid\":"+jsonText(ntripConfig.ssid)+",\"host\":"+jsonText(ntripConfig.host);
