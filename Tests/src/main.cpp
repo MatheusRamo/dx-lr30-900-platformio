@@ -20,4 +20,5 @@ static void testSequence(){RtcmRadio::SequenceTracker t;uint16_t lost=0;CHECK(t.
 static void testPacketLossRecovery(){uint8_t partial[128],valid[64];size_t a=makeRtcm(partial,1077,80),b=makeRtcm(valid,1005,20);(void)a;RtcmCapture c;Rtcm3Parser p(rtcmCb,&c);p.feed(partial,30);p.reset();p.feed(valid,b);CHECK(c.valid==1&&c.type==1005);}
 void runControlTests();
 void runGnssTests();
-int main(){testCrcs();testUart();testRtcmSplitAndCorruption();testRadioStreamAcrossPackets();testSequence();testPacketLossRecovery();runControlTests();runGnssTests();puts("All protocol tests passed");return 0;}
+void runNtripTests();
+int main(){testCrcs();testUart();testRtcmSplitAndCorruption();testRadioStreamAcrossPackets();testSequence();testPacketLossRecovery();runControlTests();runGnssTests();runNtripTests();puts("All protocol tests passed");return 0;}

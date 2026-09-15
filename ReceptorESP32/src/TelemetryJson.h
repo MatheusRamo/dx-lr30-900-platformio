@@ -30,7 +30,7 @@ static void appendTelemetry(String &s)
     const bool fresh = g.hasGga && now - lastGgaAt < 3000;
     const bool gstFresh = g.gstCount && now - lastGstAt < 3000;
     const bool gstMatch = gstFresh && fresh && *g.utc && *g.gstUtc && fabs(atof(g.utc) - atof(g.gstUtc)) < 0.001;
-    s += ",\"report\":{\"schema_version\":2";
+    s += ",\"report\":{\"schema_version\":3";
     auto num = [&](const char *k, double v, int digits = 0)
     { s += ",\"" + String(k) + "\":" + (isfinite(v) ? String(v, digits) : String("null")); };
     auto text = [&](const char *k, const char *v)
@@ -44,6 +44,30 @@ static void appendTelemetry(String &s)
     text("rover_id", device);
     num("rover_boot", roverBoot);
     num("rover_uptime_ms", now);
+    text("correction_source", corrections.name());
+    num("correction_session", corrections.session);
+    num("correction_source_elapsed_ms", (uint32_t)(now-correctionSelectedAt));
+    flag("radio_corrections_enabled", corrections.source==CorrectionInput::LORA);
+    text("rover_ntrip_state", ntripState.c_str());
+    text("rover_ntrip_error", ntripError.c_str());
+    num("rover_ntrip_http_status", ntripHttpStatus);
+    flag("rover_ntrip_worker_ready", ntripWorkerReady);
+    text("rover_ntrip_host", ntripConfig.host);
+    num("rover_ntrip_port", ntripConfig.port);
+    text("rover_ntrip_mountpoint", ntripConfig.mount);
+    flag("rover_ntrip_gga_enabled", ntripConfig.sendGga);
+    num("rover_ntrip_body_bytes", (double)ntripBodyBytes);
+    num("rover_ntrip_rate_bps", ntripRate);
+    num("rover_ntrip_attempts", ntripAttempts);
+    num("rover_ntrip_failures", ntripFailures);
+    num("rover_ntrip_queue_stale_drops", ntripQueueDrops);
+    num("rover_ntrip_gga_sent", ntripGgaSent);
+    age("rover_ntrip_data_age_ms", ntripLastData, ntripLastData!=0);
+    age("rover_ntrip_gga_age_ms", ntripLastGga, ntripLastGga!=0);
+    flag("rover_wifi_connected", WiFi.status()==WL_CONNECTED);
+    num("rover_wifi_status", WiFi.status());
+    num("rover_wifi_rssi_dbm", WiFi.status()==WL_CONNECTED?WiFi.RSSI():NAN);
+    text("rover_wifi_ip", WiFi.status()==WL_CONNECTED?WiFi.localIP().toString().c_str():"");
     num("gga_sequence", g.ggaCount);
     age("gga_age_ms", lastGgaAt, g.hasGga);
     flag("gnss_fresh", fresh);

@@ -18,7 +18,7 @@
     'connection', 'poll_gap_ms', 'project_base_name', 'base_latitude_deg', 'base_longitude_deg', 'base_position_source', 'base_position_fix', 'base_position_saved_utc',
     'tx_antenna_height_m', 'rx_antenna_height_m', 'distance_base_horizontal_approx_m', 'distance_method', 'test_status', 'first_fix_ms', 'fix_present_at_start',
     'test_duration_ms', 'test_samples', 'test_unique_gga', 'test_fixed_gga', 'test_float_gga', 'test_connection_gaps', 'test_profile_changed', 'test_device_restarted',
-    'rtcm_frames_delta', 'radio_lost_delta', 'event'];
+    'test_source_changed', 'correction_source', 'correction_session', 'rtcm_frames_delta', 'radio_lost_delta', 'event'];
   function makeRow(snapshot, meta, kind, phoneMs, gap) {
     const r = snapshot && snapshot.report ? { ...snapshot.report } : {};
     const row = {
@@ -49,7 +49,9 @@
     if (row.connection !== 'online' || row.poll_gap_ms > 2500) test.test_connection_gaps++;
     if (row.rover_id && test.start_rover_id && row.rover_id !== test.start_rover_id) test.test_device_restarted = true;
     if (finite(row.rover_boot) && finite(test.start_boot) && row.rover_boot !== test.start_boot) test.test_device_restarted = true;
-    if (row.profile_radio && test.start_profile && row.profile_radio !== test.start_profile) test.test_profile_changed = true;
+    if (test.start_source !== 'NTRIP' && row.profile_radio && test.start_profile && row.profile_radio !== test.start_profile) test.test_profile_changed = true;
+    if (row.correction_source && test.start_source && row.correction_source !== test.start_source) test.test_source_changed = true;
+    if (finite(row.correction_session) && finite(test.start_correction_session) && row.correction_session !== test.start_correction_session) test.test_source_changed = true;
     const key = row.rover_id + ':' + row.rover_boot + ':' + row.gga_sequence;
     if (row.connection === 'online' && row.gnss_fresh && key !== test.last_gga && elapsed <= 10000) {
       test.last_gga = key; test.test_unique_gga++;
@@ -57,13 +59,13 @@
       if (row.fix_quality === 5) test.test_float_gga++;
     }
     if (row.connection === 'online') {
-      if (finite(row.rtcm_frames) && finite(test.start_rtcm) && !test.test_device_restarted && row.rtcm_frames >= test.start_rtcm) test.rtcm_frames_delta = row.rtcm_frames - test.start_rtcm;
+      if (finite(row.rtcm_frames) && finite(test.start_rtcm) && !test.test_device_restarted && !test.test_source_changed && row.rtcm_frames >= test.start_rtcm) test.rtcm_frames_delta = row.rtcm_frames - test.start_rtcm;
       else test.rtcm_frames_delta = null;
       if (finite(row.radio_lost) && finite(test.start_lost) && !test.test_device_restarted && row.radio_lost >= test.start_lost) test.radio_lost_delta = row.radio_lost - test.start_lost;
       else test.radio_lost_delta = null;
     }
     if (elapsed >= 10000) {
-      test.test_status = test.test_connection_gaps || test.test_profile_changed || test.test_device_restarted ? 'incomplete' : test.first_fix_ms === null ? 'no_fix_in_10s' : 'completed';
+      test.test_status = test.test_connection_gaps || test.test_profile_changed || test.test_source_changed || test.test_device_restarted ? 'incomplete' : test.first_fix_ms === null ? 'no_fix_in_10s' : 'completed';
     }
     return test;
   }
@@ -75,6 +77,7 @@
   let token = '', loaded = false, storageFailed = false, total = 0, pointTotal = 0, fetching = false;
   let currentPointName = '', currentPointId = uid();
   let reportKeys = [];
+  let ntripLoaded = false, ntripLoading = false, correctionBusy = false;
   function note(message) { $('notice').textContent = message; }
   function openDB() {
     return new Promise((resolve, reject) => {
@@ -139,11 +142,12 @@
     if (test) throw new Error('Já existe uma medição.'); await saveSettings();
     currentPointId = uid();
     const snapshot = freshSnapshot(), r = snapshot?.report || {};
-    if (snapshot?.pending) throw new Error('Aguarde a troca do perfil.');
+    if (snapshot?.pending && r.correction_source !== 'NTRIP') throw new Error('Aguarde a troca do perfil.');
     const row = makeRow(snapshot, metadata(), 'point', Date.now(), 0);
     test = {
       ...row, test_status: 'recording', first_fix_ms: r.gnss_fresh && r.fix_quality === 4 ? 0 : null, fix_present_at_start: !!(r.gnss_fresh && r.fix_quality === 4),
-      test_duration_ms: 0, test_samples: 0, test_unique_gga: 0, test_fixed_gga: 0, test_float_gga: 0, test_connection_gaps: 0, test_profile_changed: false, test_device_restarted: false,
+      test_duration_ms: 0, test_samples: 0, test_unique_gga: 0, test_fixed_gga: 0, test_float_gga: 0, test_connection_gaps: 0, test_profile_changed: false, test_device_restarted: false, test_source_changed: false,
+      start_source: r.correction_source, start_correction_session: r.correction_session,
       start_boot: r.rover_boot, start_rover_id: r.rover_id, start_profile: r.profile_radio, start_rtcm: r.rtcm_frames, start_lost: r.radio_lost, last_gga: null,
       started_perf: performance.now(), rtcm_frames_delta: null, radio_lost_delta: null
     };
@@ -181,16 +185,21 @@
     showPairs('status', [['GNSS', r.fix_state], ['Coordenadas', finite(r.latitude_deg) && finite(r.longitude_deg) ? r.latitude_deg.toFixed(9) + ', ' + r.longitude_deg.toFixed(9) : 'Indisponíveis'],
     ['Distância horizontal aproximada à base', d === null ? 'Cadastre a posição do transmissor' : d.toFixed(1) + ' m'],
     ['Precisão GST · σ latitude / longitude / altitude', r.precision_source === 'UNAVAILABLE' ? 'Não informada / época diferente' : [r.sigma_lat_m, r.sigma_lon_m, r.sigma_alt_m].map(v => finite(v) ? v.toFixed(4) + ' m' : '—').join(' / ')],
-    ['Perfil confirmado pela base', snapshot.baseFresh ? r.profile_active : 'Aguardando confirmação'], ['Troca', snapshot.state],
+    ['Origem das correções', r.correction_source || 'LORA'],
+    ['Perfil confirmado pela base', r.correction_source === 'NTRIP' ? 'Não utilizado nas correções NTRIP' : snapshot.baseFresh ? r.profile_active : 'Aguardando confirmação'], ['Troca do rádio', snapshot.state],
     ['RTCM / sinal', r.rtcm_rate_bps + ' B/s · RSSI ' + r.rssi_rtcm_dbm + ' dBm · SNR ' + r.snr_rtcm_db + ' dB'],
     ['Telemetria da base', r.base_telemetry_age_ms === null ? 'Indisponível' : 'Recebida há ' + (r.base_telemetry_age_ms / 1000).toFixed(1) + ' s']]);
     showPairs('details', Object.entries(r));
+    const direct = r.correction_source === 'NTRIP';
+    $('correctionStatus').textContent = 'Origem ativa: ' + (r.correction_source || 'LORA') + (direct ? ' · Wi-Fi ' + (r.rover_wifi_connected ? 'conectado' : 'aguardando') + ' · NTRIP ' + r.rover_ntrip_state + ' · RTCM ' + r.rtcm_rate_bps + ' B/s' + (r.rover_ntrip_error ? ' · erro: ' + r.rover_ntrip_error : '') : ' · RTCM recebido do rádio');
+    if (!ntripLoaded && !ntripLoading) loadNtrip().catch(e => { $('correctionFeedback').textContent = e.message; });
     if (!loaded) { snapshot.profiles.forEach((p, i) => { const o = document.createElement('option'); o.value = i; o.textContent = p; $('profile').appendChild(o); }); $('profile').value = snapshot.active; loaded = true; }
     renderButtons();
   }
   function renderButtons() {
     const unavailable = !db || storageFailed;
-    $('change').disabled = !latest?.paired || latest?.pending || !!test;
+    $('change').disabled = !latest?.paired || latest?.pending || !!test || latest?.report?.correction_source === 'NTRIP' || correctionBusy;
+    for (const id of ['applySource', 'saveNtrip', 'reloadNtrip']) $(id).disabled = !latest || !!test || correctionBusy || !!latest.pending;
     for (const id of ['savePoint', 'test']) $(id).disabled = unavailable || !!test;
     $('record').disabled = unavailable; $('record').textContent = recording ? 'Encerrar gravação contínua' : 'Iniciar gravação contínua · aproximadamente 1 Hz';
   }
@@ -200,10 +209,44 @@
     $('feedback').textContent = await response.text();
     const row = makeRow(freshSnapshot(), metadata(), 'event', Date.now(), 0); row.event = 'profile_request ' + $('profile').value + ' HTTP ' + response.status; await saveRecord(row);
   }
+  async function loadNtrip() {
+    if (ntripLoading) return; ntripLoading = true;
+    try {
+      const response = await fetch('/corrections/config', { cache: 'no-store' });
+      if (!response.ok) throw new Error('Não foi possível ler a configuração NTRIP.');
+      const c = await response.json();
+      if (!c.source) throw new Error('Atualize o firmware do receptor para configurar NTRIP.');
+      for (const [id, key] of Object.entries({ ntripSsid: 'ssid', ntripHost: 'host', ntripPort: 'port', ntripMount: 'mount', ntripUser: 'user', correctionSource: 'source' })) $(id).value = c[key] ?? '';
+      $('ntripGga').value = c.gga ? '1' : '0';
+      $('ntripWifiPass').value = ''; $('ntripPassword').value = ''; $('clearWifi').value = '0'; $('clearPassword').value = '0';
+      $('ntripSaved').textContent = 'Senha Wi-Fi salva: ' + (c.wifiPasswordSaved ? 'sim' : 'não') + ' · senha NTRIP salva: ' + (c.ntripPasswordSaved ? 'sim' : 'não');
+      ntripLoaded = true;
+    } finally { ntripLoading = false; }
+  }
+  async function correctionPost(path, fields, eventName) {
+    if (test || correctionBusy) throw new Error('Aguarde a medição ou operação atual.');
+    correctionBusy = true; renderButtons();
+    try {
+      const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 8000);
+      let response;
+      try { response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields), signal: controller.signal }); }
+      finally { clearTimeout(timer); }
+      const message = await response.text(); $('correctionFeedback').textContent = message;
+      if (!response.ok) throw new Error(message);
+      // Never store request fields: they can contain passwords.
+      if (db && !storageFailed) { const row = makeRow(freshSnapshot(), metadata(), 'event', Date.now(), 0); row.event = eventName; await saveRecord(row); }
+      $('ntripWifiPass').value = ''; $('ntripPassword').value = ''; ntripLoaded = false;
+    } finally { correctionBusy = false; renderButtons(); }
+  }
+  async function saveNtrip() {
+    const fields = {};
+    for (const [key, id] of Object.entries({ ssid: 'ntripSsid', wifiPass: 'ntripWifiPass', host: 'ntripHost', port: 'ntripPort', mount: 'ntripMount', user: 'ntripUser', password: 'ntripPassword', gga: 'ntripGga', clearWifi: 'clearWifi', clearPassword: 'clearPassword' })) fields[key] = $(id).value;
+    return correctionPost('/corrections/config', fields, 'ntrip_configuration_saved');
+  }
   async function exportCSV(pointsOnly) {
     if (!db) throw new Error('Banco do celular indisponível.');
     const keys = new Set(META); let count = 0;
-    const internal = new Set(['start_boot', 'start_rover_id', 'start_profile', 'start_rtcm', 'start_lost', 'last_gga', 'started_perf']);
+    const internal = new Set(['start_boot', 'start_rover_id', 'start_profile', 'start_source', 'start_correction_session', 'start_rtcm', 'start_lost', 'last_gga', 'started_perf']);
     await recordsEach(row => { if (pointsOnly && row.record_type !== 'point') return; count++; Object.keys(row).filter(k => !internal.has(k)).forEach(k => keys.add(k)); });
     if (!count) throw new Error('Não há registros para exportar.');
     const columns = [...keys], parts = ['\uFEFF' + columns.map(csvCell).join(',') + '\r\n']; let chunk = ''; let n = 0;
@@ -227,6 +270,8 @@
     const bind = (id, fn) => $(id).addEventListener('click', () => Promise.resolve().then(fn).catch(e => note(e.message)));
     bind('saveSettings', saveSettings); bind('saveBase', () => saveBase(false)); bind('captureBase', () => saveBase(true)); bind('savePoint', savePoint); bind('test', beginTest); bind('record', toggleRecording);
     bind('change', changeProfile); bind('exportPoints', () => exportCSV(true)); bind('exportAll', () => exportCSV(false));
+    bind('saveNtrip', saveNtrip); bind('reloadNtrip', loadNtrip);
+    bind('applySource', () => correctionPost('/corrections/source', { source: $('correctionSource').value }, 'correction_source_requested ' + $('correctionSource').value));
     try {
       db = await openDB(); settings = await getSettings();
       const map = { project: 'project', operator: 'operator', point: 'point_name', conditions: 'conditions', notes: 'notes', txHeight: 'tx_antenna_height_m', rxHeight: 'rx_antenna_height_m', baseName: 'project_base_name', baseLat: 'base_latitude_deg', baseLon: 'base_longitude_deg' };

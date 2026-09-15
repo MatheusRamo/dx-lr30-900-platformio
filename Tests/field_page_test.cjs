@@ -22,4 +22,6 @@ t=test();updateTest(t,missing,10000);assert.equal(t.test_status,'incomplete');as
 t=test();updateTest(t,{...row,rover_boot:124},10000);assert.equal(t.test_device_restarted,true);assert.equal(t.test_status,'incomplete');assert.equal(t.rtcm_frames_delta,null);
 t=test();updateTest(t,{...row,profile_radio:'RTK_FAST'},10000);assert.equal(t.test_profile_changed,true);assert.equal(t.test_status,'incomplete');
 t=test();updateTest(t,{...row,gnss_fresh:false},10000);assert.equal(t.first_fix_ms,null);assert.equal(t.test_status,'no_fix_in_10s');
+t={...test(),start_source:'NTRIP',start_correction_session:7};updateTest(t,{...row,correction_source:'NTRIP',correction_session:7,profile_radio:'RTK_FAST'},10000);assert.equal(t.test_status,'completed');assert.equal(t.test_profile_changed,false);
+t={...test(),start_source:'NTRIP',start_correction_session:7};updateTest(t,{...row,correction_source:'NTRIP',correction_session:8,rtcm_frames:20},10000);assert.equal(t.test_status,'incomplete');assert.equal(t.test_source_changed,true);assert.equal(t.rtcm_frames_delta,null);
 console.log('Phone report tests passed: CSV, distance, stale/missing data, time to FIX, duplicates, gaps and restarts');

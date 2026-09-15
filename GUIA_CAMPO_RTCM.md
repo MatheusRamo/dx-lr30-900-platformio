@@ -1,5 +1,9 @@
 # Perfis e controle remoto RTCM/LoRa
 
+Para testar **NTRIP direto no receptor**, consulte [GUIA_NTRIP_ROVER.md](GUIA_NTRIP_ROVER.md).
+Essa atualização exige gravar somente o ESP32 do receptor; a preparação completa
+abaixo se aplica à instalação inicial do sistema LoRa.
+
 ## Preparar uma vez, antes de sair
 
 1. Gravar os dois ESP32 atualizados e o firmware STM32 atualizado nos dois

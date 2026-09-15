@@ -12,6 +12,9 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include "FieldPage.h"
+#include "CorrectionInput.h"
+#include "DirectNtrip.h"
+#include "NtripResponse.h"
 
 HardwareSerial LoRaSerial(2), GNSSSerial(1);
 BluetoothSerial SerialBT;
@@ -40,7 +43,18 @@ static void bluetoothWriter(void *)
             SerialBT.write(line.data, line.length);
     }
 }
-Rtcm3Parser rtcmParser;
+CorrectionInput corrections;
+DirectNtrip directNtrip;
+RoverNtripConfig ntripConfig;
+NtripResponse ntripResponse;
+bool ntripWorkerReady=false, applyCorrectionsPending=false;
+String ntripState="OFF", ntripError;
+uint32_t ntripAttempts=0, ntripFailures=0, ntripGgaSent=0, ntripQueueDrops=0;
+uint32_t ntripLastData=0, ntripLastGga=0, ntripConnectedAt=0, correctionSelectedAt=0;
+uint64_t ntripBodyBytes=0;
+uint32_t ntripRate=0;
+int ntripHttpStatus=0;
+uint32_t ntripValidAt=0;
 RtcmRadio::SequenceTracker sequenceTracker;
 GnssMonitor gnss;
 
@@ -71,11 +85,14 @@ static void onRtcm(void *, const uint8_t *frame, size_t length, uint16_t type, b
         maxRtcmGap = millis() - lastRtcmAt;
     lastRtcmAt = millis();
     lastRtcmType = type;
+    if(corrections.source==CorrectionInput::NTRIP) ntripValidAt=millis();
     gnssWritten += GNSSSerial.write(frame, length);
 }
 static void onLr30(void *, const Lr30Link::Frame &f)
 {
     if (radioControl.onFrame(f))
+        return;
+    if (corrections.source != CorrectionInput::LORA)
         return;
     if (f.type != Lr30Link::RX_PACKET || f.length < 4)
         return;
@@ -104,17 +121,17 @@ static void onLr30(void *, const Lr30Link::Frame &f)
     if (result == RtcmRadio::SequenceResult::LOSS)
     {
         stats.lost += lost;
-        rtcmParser.reset();
+        corrections.reset(CorrectionInput::LORA);
     }
     else if (result == RtcmRadio::SequenceResult::SESSION_CHANGED)
-        rtcmParser.reset();
+        corrections.reset(CorrectionInput::LORA);
     if (header.flags & 1)
-        rtcmParser.reset(); // First fragment of a complete RTCM message.
+        corrections.reset(CorrectionInput::LORA); // First fragment of a complete RTCM message.
     stats.radioPackets++;
     lastRadioAt = millis();
     stats.rssi = rssi;
     stats.snr = snr;
-    rtcmParser.feed(stream, header.length);
+    corrections.feed(CorrectionInput::LORA, stream, header.length);
 }
 static float lossPercent()
 {
@@ -125,6 +142,7 @@ static void showStatus()
 {
     const auto &g = gnss.status();
     Serial.println("========== RTK ROVER ==========");
+    Serial.printf("Corrections: %s, NTRIP: %s, Error: %s\n", corrections.name(), ntripState.c_str(), ntripError.c_str());
     Serial.printf("Profile: %s, Radio ready: %d, Pending: %d, Rescue: %d\n", RadioControl::profiles[radioControl.machine.active()].name, radioControl.ready(), radioControl.machine.pending(), radioControl.machine.rescue());
     Serial.printf("Radio: RX %lu, Lost %lu, Loss %.2f%%, RSSI %d, SNR %d\n", stats.radioPackets, stats.lost, lossPercent(), stats.rssi, stats.snr);
     Serial.printf("RTCM: Frames %lu, CRC OK %lu, CRC Error %lu, RX %lu B/s\n", stats.rtcmFrames, stats.rtcmCrcOk, stats.rtcmCrcErrors, stats.rtcmRate);
@@ -169,6 +187,10 @@ static void updateDisplay()
     display.print(stats.rtcmRate / 1000.0f, 2);
     display.print("kB/s");
     display.setCursor(0, 54);
+    if (corrections.source == CorrectionInput::NTRIP) {
+        display.print("NTRIP "); display.print(ntripState);
+        display.display(); return;
+    }
     display.print("P");
     display.print(radioControl.machine.active());
     display.print(radioControl.machine.pending() ? " TROCA" : radioControl.machine.rescue() ? " RESGATE"
@@ -211,6 +233,8 @@ static void serviceGnss()
         {
             ggaCount = gnss.status().ggaCount;
             lastGgaAt = millis();
+            const auto &g=gnss.status();
+            directNtrip.gga(g.quality && isfinite(g.latitude) && isfinite(g.longitude) ? g.rawGga : "", lastGgaAt);
         }
         static uint32_t gst = 0, gsa = 0, rmc = 0;
         const auto &g = gnss.status();
@@ -246,7 +270,8 @@ static void serviceUsb()
             {
                 stats = Stats{};
                 sequenceTracker.reset();
-                rtcmParser.reset();
+                corrections.select(corrections.source);
+                lastRtcmAt=0; maxRtcmGap=0;
                 Serial.println("OK STATS_RESET");
             }
             else if (usbLine == "NET_INFO")
@@ -254,8 +279,8 @@ static void serviceUsb()
             else if (usbLine.startsWith("WIFI_PASS="))
             {
                 String password = usbLine.substring(10);
-                if (password.length() < 8)
-                    Serial.println("ERR WIFI_PASS_MIN_8");
+                if (password.length() < 8 || password.length() > 63)
+                    Serial.println("ERR WIFI_PASS_LENGTH_8_TO_63");
                 else
                 {
                     Preferences p;
@@ -275,7 +300,7 @@ static void serviceUsb()
             else if (usbLine.startsWith("PROFILE="))
             {
                 int id = RadioControl::profileId(usbLine.substring(8).c_str());
-                Serial.println(id >= 0 && radioControl.request(id) ? "OK REQUESTED" : "ERR PROFILE/BUSY/KEY");
+                Serial.println(corrections.source==CorrectionInput::LORA && id >= 0 && radioControl.request(id) ? "OK REQUESTED" : "ERR PROFILE/BUSY/SOURCE");
             }
             else if (!usbLine.isEmpty())
                 Serial.println("Comandos: STATUS, STATS_RESET, NET_INFO, WIFI_PASS=, PROFILE_LIST, PROFILE=nome");
@@ -300,20 +325,24 @@ static bool startAccessPoint()
 }
 static bool baseFresh() { return radioControl.machine.heardBase() && !radioControl.machine.rescue() && millis() - radioControl.machine.lastHeard() < 4000; }
 #include "TelemetryJson.h"
+#include "RoverNtripWeb.h"
 static void setupWeb()
 {
     Preferences p;
     p.begin("rover-web", false);
     bool custom = p.getBool("password_custom", false);
     apPassword = custom ? p.getString("password", "12345678") : "12345678";
+    if (apPassword.length()<8 || apPassword.length()>63) { apPassword="12345678"; custom=false; p.putBool("password_custom",false); }
     if (!custom)
         p.putString("password", apPassword);
     p.end();
-    WiFi.mode(WIFI_AP);
+    WiFi.persistent(false);
+    WiFi.mode(WIFI_AP_STA);
     if (!startAccessPoint())
         Serial.println("ERR WIFI_AP");
+    setupNtrip();
     web.on("/", HTTP_GET, []
-           { web.send_P(200, "text/html; charset=utf-8", FIELD_PAGE); });
+           { web.sendHeader("Cache-Control","no-store"); web.send_P(200, "text/html; charset=utf-8", FIELD_PAGE); });
     web.on("/report.js", HTTP_GET, []
            {
         extern const uint8_t scriptStart[] asm("_binary_src_FieldReport_js_start");
@@ -321,7 +350,7 @@ static void setupWeb()
     web.on("/status", HTTP_GET, []
            {
         const auto&g=gnss.status();const auto&m=radioControl.machine;
-        String s="{\"token\":\"\",\"profiles\":[";
+        String s="{\"source\":"+jsonText(corrections.name())+",\"token\":\"\",\"profiles\":[";
         for(uint8_t i=0;i<RadioControl::PROFILE_COUNT;i++){if(i)s+=",";s+="\""+String(RadioControl::profiles[i].name)+"\"";}
         s+="],\"active\":"+String(m.active())+",\"radio\":"+String(m.profile());
         s+=",\"ready\":"+String(radioControl.ready()?"true":"false")+",\"paired\":true";
@@ -335,8 +364,9 @@ static void setupWeb()
         web.sendHeader("Cache-Control","no-store");web.send(200,"application/json",s); });
     web.on("/profile", HTTP_POST, []
            {if(!authorized())return;
+        if(corrections.source!=CorrectionInput::LORA){web.send(409,"text/plain","Selecione LoRa para trocar o perfil do enlace.");return;}
         String value=web.arg("id");if(value.length()!=1||value[0]<'0'||value[0]>='0'+RadioControl::PROFILE_COUNT){web.send(400,"text/plain","Perfil invalido.");return;}
-        bool ok=radioControl.request(value[0]-'0');web.send(ok?202:409,"text/plain",ok?"Pedido enviado para negociacao; aguarde a confirmacao RF.":"Operacao ocupada ou chave nao configurada."); });
+        bool ok=radioControl.request(value[0]-'0');web.send(ok?202:409,"text/plain",ok?"Pedido enviado para negociacao; aguarde a confirmacao RF.":"Operacao ocupada ou radio indisponivel."); });
     web.on("/test", HTTP_POST, []
            { web.send(410, "text/plain", "Atualize a pagina: medicao e historico agora ficam no celular."); });
     web.on("/results.csv", HTTP_GET, []
@@ -380,7 +410,7 @@ void setup()
         display.print("RTK-ROVER iniciando");
         display.display();
     }
-    rtcmParser.setCallback(onRtcm, nullptr);
+    corrections.parser.setCallback(onRtcm, nullptr);
     lr30.setHandler(onLr30, nullptr);
     radioControl.begin(false, 0);
     setupWeb();
@@ -394,14 +424,16 @@ void loop()
     if (lastProfile != radioControl.machine.profile())
     {
         lastProfile = radioControl.machine.profile();
-        rtcmParser.reset();
+        corrections.reset(CorrectionInput::LORA);
         sequenceTracker.reset();
     }
     serviceUsb();
     serviceGnss();
+    serviceDirectNtrip();
     lr30.poll();
     radioControl.service();
     web.handleClient();
+    if(applyCorrectionsPending) { applyCorrectionsPending=false; applyCorrectionSource(); }
     updateRate();
     updateDisplay();
 }
