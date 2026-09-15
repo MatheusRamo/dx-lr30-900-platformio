@@ -50,8 +50,31 @@ economia de energia do Wi-Fi para evitar que DHCP e HTTP parem durante o teste.
 
 O Bluetooth clássico aparece como **RTK-ROVER** e usa o PIN **1234** do próprio
 pareamento Bluetooth. Esse PIN não é a antiga `pairKey` dos comandos pelo rádio,
-que foi removida. O Bluetooth fornece somente as sentenças NMEA; toda a
-configuração e o relatório ficam na página Wi-Fi.
+que foi removida. O Bluetooth fornece as sentenças NMEA e agora também aceita
+os comandos de configuração e status descritos abaixo.
+
+Também é possível configurar o modo e o NTRIP sem abrir a página, usando um
+terminal Bluetooth que envie uma linha por comando:
+
+```text
+NTRIP_SSID=nome_da_rede
+NTRIP_WIFI_PASS=senha_da_rede
+NTRIP_HOST=18.230.73.64
+NTRIP_PORT=2101
+NTRIP_MOUNT=AUTO
+NTRIP_USER=geofmath
+NTRIP_PASS=12345678
+NTRIP_GGA=1
+NTRIP_SAVE
+MODE=2
+STATUS
+```
+
+Use `MODE=1` para LoRa e `MODE=2` para NTRIP direto. `HELP` mostra todos os
+comandos, `PING` responde `PONG` e `PROFILE_LIST`/`PROFILE=nome` continuam
+disponíveis para os perfis de rádio. O firmware traz os parâmetros do caster
+acima como padrão de teste quando ainda não existe configuração salva; o SSID
+e a senha Wi-Fi continuam obrigatórios para o acesso à internet.
 
 ## Comparação LoRa × NTRIP
 

@@ -1,5 +1,13 @@
 #pragma once
 
+// Defaults for the current field test. Wi-Fi SSID/password remain configurable
+// over Bluetooth because they depend on the local internet hotspot.
+static constexpr const char *TEST_NTRIP_HOST = "18.230.73.64";
+static constexpr uint16_t TEST_NTRIP_PORT = 2101;
+static constexpr const char *TEST_NTRIP_MOUNT = "AUTO";
+static constexpr const char *TEST_NTRIP_USER = "geofmath";
+static constexpr const char *TEST_NTRIP_PASSWORD = "12345678";
+
 static bool configValid(const RoverNtripConfig &c) {
     if (!*c.ssid || !*c.host || !*c.mount || !c.port) return false;
     if (*c.wifiPass && (strlen(c.wifiPass)<8 || strlen(c.wifiPass)>63)) return false;
@@ -22,7 +30,6 @@ static void applyCorrectionSource() {
     if (ntripWorkerReady) directNtrip.configure(ntripConfig,enabled);
     if(enabled) {
         WiFi.mode(WIFI_AP_STA);
-        WiFi.setSleep(false);
         ntripState="WIFI_CONNECTING";
         WiFi.setAutoReconnect(true); WiFi.begin(ntripConfig.ssid,ntripConfig.wifiPass);
     } else {
@@ -99,9 +106,18 @@ static bool readField(const char *name,char *dest,size_t size,bool keepEmpty=fal
 }
 static void setupNtrip() {
     Preferences p; p.begin("rover-ntrip",true);
-    if(p.getBytesLength("config")==sizeof(ntripConfig)) p.getBytes("config",&ntripConfig,sizeof(ntripConfig));
+    const bool stored = p.getBytesLength("config")==sizeof(ntripConfig);
+    if(stored) p.getBytes("config",&ntripConfig,sizeof(ntripConfig));
     // Always bound persisted strings before validating/using them.
     ntripConfig.ssid[32]=ntripConfig.wifiPass[63]=ntripConfig.host[127]=ntripConfig.mount[127]=ntripConfig.user[95]=ntripConfig.password[95]=0;
+    if(!stored || !*ntripConfig.host) {
+        strlcpy(ntripConfig.host, TEST_NTRIP_HOST, sizeof(ntripConfig.host));
+        ntripConfig.port = TEST_NTRIP_PORT;
+        strlcpy(ntripConfig.mount, TEST_NTRIP_MOUNT, sizeof(ntripConfig.mount));
+        strlcpy(ntripConfig.user, TEST_NTRIP_USER, sizeof(ntripConfig.user));
+        strlcpy(ntripConfig.password, TEST_NTRIP_PASSWORD, sizeof(ntripConfig.password));
+        Serial.println("NTRIP: defaults de teste carregados; configure SSID Wi-Fi via Bluetooth.");
+    }
     if(p.getBool("direct",false) && configValid(ntripConfig)) {
         ntripWorkerReady=directNtrip.begin();
         if(ntripWorkerReady) corrections.source=CorrectionInput::NTRIP;

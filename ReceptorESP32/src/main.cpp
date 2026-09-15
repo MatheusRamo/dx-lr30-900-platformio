@@ -35,6 +35,8 @@ struct NmeaLine
     uint8_t data[192];
 };
 QueueHandle_t nmeaQueue = nullptr;
+String bluetoothLine;
+bool bluetoothWasConnected = false;
 static void bluetoothWriter(void *)
 {
     NmeaLine line;
@@ -327,13 +329,187 @@ static bool startAccessPoint()
     // here made phones lose DHCP/HTTP during Wi-Fi mode transitions.
     if (!(WiFi.getMode() & WIFI_MODE_AP))
         WiFi.mode((wifi_mode_t)(WiFi.getMode() | WIFI_MODE_AP));
-    WiFi.setSleep(false);
     accessPointReady = WiFi.softAP("RTK-ROVER", apPassword.c_str(), 1, 0, 4);
     return accessPointReady;
 }
 static bool baseFresh() { return radioControl.machine.heardBase() && !radioControl.machine.rescue() && millis() - radioControl.machine.lastHeard() < 4000; }
 #include "TelemetryJson.h"
 #include "RoverNtripWeb.h"
+static void bluetoothReply(const String &message)
+{
+    if (bluetoothReady && SerialBT.hasClient())
+        SerialBT.println(message);
+}
+static void bluetoothStatus()
+{
+    String mode = corrections.source == CorrectionInput::NTRIP ? "NTRIP" : "LORA";
+    String wifi = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "OFF";
+    String fix = lastGgaAt && millis() - lastGgaAt < 3000 ? GnssMonitor::fixText(gnss.status().quality) : "STALE";
+    bluetoothReply("STATUS MODE=" + mode + " WIFI=" + wifi + " NTRIP=" + ntripState +
+                   " RTCM_BPS=" + String(stats.rtcmRate) + " FIX=" + fix +
+                   " AP_CLIENTS=" + String(WiFi.softAPgetStationNum()) +
+                   " HEAP=" + String(ESP.getFreeHeap()));
+}
+static bool bluetoothSetField(const String &line, const char *prefix, char *destination, size_t capacity)
+{
+    if (!line.startsWith(prefix))
+        return false;
+    String value = line.substring(strlen(prefix));
+    if (value.length() >= capacity || strlen(value.c_str()) != value.length())
+    {
+        bluetoothReply(String("ERR ") + prefix + "_LENGTH");
+        return true;
+    }
+    value.toCharArray(destination, capacity);
+    bluetoothReply(String("OK ") + prefix);
+    return true;
+}
+static void serviceBluetooth()
+{
+    const bool connected = bluetoothReady && SerialBT.hasClient();
+    if (!connected)
+    {
+        bluetoothWasConnected = false;
+        bluetoothLine = "";
+        return;
+    }
+    if (!bluetoothWasConnected)
+    {
+        bluetoothWasConnected = true;
+        bluetoothReply("RTK-ROVER BT CONFIG READY PIN=1234");
+        bluetoothReply("Use HELP for commands; NMEA output remains enabled.");
+    }
+    while (SerialBT.available())
+    {
+        char c = (char)SerialBT.read();
+        if (c != '\r' && c != '\n')
+        {
+            if (bluetoothLine.length() < 180)
+                bluetoothLine += c;
+            else
+                bluetoothLine = "";
+            continue;
+        }
+        bluetoothLine.trim();
+        if (bluetoothLine.isEmpty())
+            continue;
+        const String line = bluetoothLine;
+        bluetoothLine = "";
+        if (line == "HELP")
+        {
+            bluetoothReply("COMMANDS: STATUS, MODE=1|2, NTRIP_SSID=, NTRIP_WIFI_PASS=, NTRIP_HOST=, NTRIP_PORT=, NTRIP_MOUNT=, NTRIP_USER=, NTRIP_PASS=, NTRIP_GGA=0|1, NTRIP_SAVE, PROFILE_LIST, PROFILE=, PING");
+            bluetoothReply("MODE 1=LORA 2=NTRIP; use NTRIP_SAVE after editing fields");
+        }
+        else if (line == "PING")
+            bluetoothReply("PONG");
+        else if (line == "STATUS")
+            bluetoothStatus();
+        else if (line == "PROFILE_LIST")
+        {
+            for (uint8_t i = 0; i < RadioControl::PROFILE_COUNT; i++)
+                bluetoothReply(String(i) + " " + RadioControl::profiles[i].name);
+        }
+        else if (line.startsWith("PROFILE="))
+        {
+            int id = RadioControl::profileId(line.substring(8).c_str());
+            bluetoothReply(corrections.source == CorrectionInput::LORA && id >= 0 && radioControl.request(id)
+                               ? "OK PROFILE_REQUESTED"
+                               : "ERR PROFILE_BUSY_OR_NTRIP");
+        }
+        else if (line.startsWith("MODE="))
+        {
+            String value = line.substring(5);
+            const bool ntrip = value == "2" || value == "NTRIP";
+            const bool lora = value == "1" || value == "LORA";
+            if (!lora && !ntrip)
+                bluetoothReply("ERR MODE_USE_1_LORA_OR_2_NTRIP");
+            else if (ntrip && !configValid(ntripConfig))
+                bluetoothReply("ERR NTRIP_CONFIG_INCOMPLETE");
+            else if (ntrip && !ntripWorkerReady && !(ntripWorkerReady = directNtrip.begin()))
+                bluetoothReply("ERR NTRIP_MEMORY");
+            else if (radioControl.machine.pending())
+                bluetoothReply("ERR RADIO_PROFILE_NEGOTIATION_BUSY");
+            else
+            {
+                CorrectionInput::Source previous = corrections.source;
+                corrections.source = ntrip ? CorrectionInput::NTRIP : CorrectionInput::LORA;
+                if (!saveNtripConfig())
+                {
+                    corrections.source = previous;
+                    bluetoothReply("ERR NVS_SAVE");
+                }
+                else
+                {
+                    applyCorrectionsPending = true;
+                    bluetoothReply(String("OK MODE=") + (ntrip ? "2 NTRIP" : "1 LORA"));
+                }
+            }
+        }
+        else if (bluetoothSetField(line, "NTRIP_SSID=", ntripConfig.ssid, sizeof(ntripConfig.ssid)))
+            ;
+        else if (bluetoothSetField(line, "NTRIP_WIFI_PASS=", ntripConfig.wifiPass, sizeof(ntripConfig.wifiPass)))
+            ;
+        else if (bluetoothSetField(line, "NTRIP_HOST=", ntripConfig.host, sizeof(ntripConfig.host)))
+            ;
+        else if (bluetoothSetField(line, "NTRIP_MOUNT=", ntripConfig.mount, sizeof(ntripConfig.mount)))
+            ;
+        else if (bluetoothSetField(line, "NTRIP_USER=", ntripConfig.user, sizeof(ntripConfig.user)))
+            ;
+        else if (bluetoothSetField(line, "NTRIP_PASS=", ntripConfig.password, sizeof(ntripConfig.password)))
+            ;
+        else if (line.startsWith("NTRIP_PORT="))
+        {
+            String value = line.substring(11);
+            bool valid = !value.isEmpty();
+            for (size_t i = 0; i < value.length(); i++)
+                valid = valid && isdigit((unsigned char)value[i]);
+            long port = value.toInt();
+            if (!valid || port < 1 || port > 65535)
+                bluetoothReply("ERR NTRIP_PORT");
+            else
+            {
+                ntripConfig.port = (uint16_t)port;
+                bluetoothReply("OK NTRIP_PORT");
+            }
+        }
+        else if (line.startsWith("NTRIP_GGA="))
+        {
+            String value = line.substring(10);
+            if (value != "0" && value != "1")
+                bluetoothReply("ERR NTRIP_GGA_USE_0_OR_1");
+            else
+            {
+                ntripConfig.sendGga = value == "1";
+                bluetoothReply("OK NTRIP_GGA");
+            }
+        }
+        else if (line == "NTRIP_SAVE" || line == "SAVE")
+        {
+            if (!configValid(ntripConfig))
+                bluetoothReply("ERR NTRIP_CONFIG_INVALID");
+            else if (!saveNtripConfig())
+                bluetoothReply("ERR NVS_SAVE");
+            else
+            {
+                if (corrections.source == CorrectionInput::NTRIP)
+                    applyCorrectionsPending = true;
+                bluetoothReply("OK NTRIP_SAVED");
+            }
+        }
+        else if (line == "NTRIP_CLEAR_WIFI")
+        {
+            ntripConfig.wifiPass[0] = 0;
+            bluetoothReply("OK NTRIP_WIFI_PASSWORD_CLEARED");
+        }
+        else if (line == "NTRIP_CLEAR_PASS")
+        {
+            ntripConfig.password[0] = 0;
+            bluetoothReply("OK NTRIP_PASSWORD_CLEARED");
+        }
+        else
+            bluetoothReply("ERR UNKNOWN_COMMAND; SEND HELP");
+    }
+}
 static bool sendWebAsset(const char *contentType, PGM_P content, size_t length)
 {
     web.setContentLength(length);
@@ -478,7 +654,7 @@ void setup()
     lr30.setHandler(onLr30, nullptr);
     radioControl.begin(false, 0);
     setupWeb();
-    Serial.println("RTK-ROVER pronto; Bluetooth SPP somente NMEA.");
+    Serial.println("RTK-ROVER pronto; Bluetooth SPP para NMEA e configuracao.");
 }
 void loop()
 {
@@ -493,6 +669,7 @@ void loop()
     }
     serviceUsb();
     serviceGnss();
+    serviceBluetooth();
     serviceDirectNtrip();
     lr30.poll();
     radioControl.service();
