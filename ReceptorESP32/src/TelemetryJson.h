@@ -21,7 +21,7 @@ static String jsonText(const char *value)
     }
     return s + "\"";
 }
-static void appendTelemetry(String &s)
+static void appendTelemetry(String &s, bool compact = false)
 {
     const uint32_t now = millis();
     const auto &g = gnss.status();
@@ -30,15 +30,25 @@ static void appendTelemetry(String &s)
     const bool fresh = g.hasGga && now - lastGgaAt < 3000;
     const bool gstFresh = g.gstCount && now - lastGstAt < 3000;
     const bool gstMatch = gstFresh && fresh && *g.utc && *g.gstUtc && fabs(atof(g.utc) - atof(g.gstUtc)) < 0.001;
-    s += ",\"report\":{\"schema_version\":3";
+    s += compact ? ",\"report_values\":[" : ",\"report\":{";
+    bool first = true;
+    auto key = [&](const char *k)
+    {
+        if (!first)
+            s += ',';
+        first = false;
+        if (!compact)
+            s += "\"" + String(k) + "\":";
+    };
     auto num = [&](const char *k, double v, int digits = 0)
-    { s += ",\"" + String(k) + "\":" + (isfinite(v) ? String(v, digits) : String("null")); };
+    { key(k); s += isfinite(v) ? String(v, digits) : String("null"); };
     auto text = [&](const char *k, const char *v)
-    { s += ",\"" + String(k) + "\":" + jsonText(v); };
+    { key(k); s += jsonText(v); };
     auto flag = [&](const char *k, bool v)
-    { s += ",\"" + String(k) + "\":" + String(v ? "true" : "false"); };
+    { key(k); s += v ? "true" : "false"; };
     auto age = [&](const char *k, uint32_t at, bool valid)
     { num(k, valid ? (double)(uint32_t)(now - at) : NAN); };
+    num("schema_version", 3);
     char device[17];
     snprintf(device, sizeof(device), "%012llx", (unsigned long long)ESP.getEfuseMac());
     text("rover_id", device);
@@ -146,7 +156,12 @@ static void appendTelemetry(String &s)
     num("control_auth_errors", radioControl.authErrors);
     num("nmea_drops", nmeaDrops);
     num("free_heap_bytes", ESP.getFreeHeap());
+    num("largest_free_heap_block_bytes", heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     num("wifi_clients", WiFi.softAPgetStationNum());
+    flag("wifi_ap_ready", accessPointReady);
+    text("wifi_ap_ip", WiFi.softAPIP().toString().c_str());
+    num("wifi_ap_channel", WiFi.channel());
+    flag("bluetooth_ready", bluetoothReady);
     flag("bluetooth_connected", SerialBT.hasClient());
     age("base_telemetry_age_ms", radioControl.baseTelemetryAt, radioControl.hasBaseTelemetry);
     num("base_boot", radioControl.hasBaseTelemetry ? (double)radioControl.baseTelemetry.boot : NAN);
@@ -165,5 +180,5 @@ static void appendTelemetry(String &s)
     text("nmea_gst", g.rawGst);
     text("nmea_gsa", g.rawGsa);
     text("nmea_rmc", g.rawRmc);
-    s += "}";
+    s += compact ? "]" : "}";
 }

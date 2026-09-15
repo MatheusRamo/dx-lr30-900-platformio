@@ -1,5 +1,14 @@
 const assert=require('node:assert/strict');
-const {distance,csvCell,makeRow,ageSnapshot,updateTest}=require('../ReceptorESP32/src/FieldReport.js');
+const fs=require('node:fs');
+const {distance,csvCell,makeRow,ageSnapshot,updateTest,inflateSnapshot,REPORT_FIELDS}=require('../ReceptorESP32/src/FieldReport.js');
+const telemetryHeader=fs.readFileSync('../ReceptorESP32/src/TelemetryJson.h','utf8');
+const staticFields=[...telemetryHeader.matchAll(/(?:num|text|flag|age)\("([^"]+)"/g)].map(match=>match[1]);
+const baseNames=telemetryHeader.match(/static const char \*names\[\] = \{([^}]+)\}/s)[1];
+const baseFields=[...baseNames.matchAll(/"([^"]+)"/g)].map(match=>match[1]);
+const firmwareFields=[...staticFields.slice(0,-4),...baseFields,...staticFields.slice(-4)];
+assert.deepEqual(REPORT_FIELDS,firmwareFields);
+const compact=inflateSnapshot({report_values:REPORT_FIELDS.map((_,index)=>index)});
+assert.equal(compact.report.schema_version,0);assert.equal(compact.report.nmea_rmc,REPORT_FIELDS.length-1);assert.equal(compact.report_values,undefined);
 assert.equal(distance(0,0,0,0),0);assert.equal(distance(null,0,0,0),null);assert.equal(distance(91,0,0,0),null);
 assert.ok(Math.abs(distance(0,0,0,1)-111195.0802)<0.1);
 assert.ok(distance(0,179.999,0,-179.999)<223);

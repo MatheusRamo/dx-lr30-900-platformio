@@ -19,12 +19,19 @@ static void applyCorrectionSource() {
     ntripBodyBytes=0; ntripRate=0; ntripLastData=0; ntripLastGga=0; ntripConnectedAt=0;
     ntripError=""; ntripHttpStatus=0; lastWifiAttempt=millis();
     bool enabled=corrections.source==CorrectionInput::NTRIP;
-    directNtrip.configure(ntripConfig,enabled);
-    WiFi.setAutoReconnect(false); WiFi.disconnect(false,false);
+    if (ntripWorkerReady) directNtrip.configure(ntripConfig,enabled);
     if(enabled) {
+        WiFi.mode(WIFI_AP_STA);
+        WiFi.setSleep(false);
         ntripState="WIFI_CONNECTING";
         WiFi.setAutoReconnect(true); WiFi.begin(ntripConfig.ssid,ntripConfig.wifiPass);
-    } else ntripState="OFF";
+    } else {
+        WiFi.setAutoReconnect(false);
+        WiFi.disconnect(false,false);
+        WiFi.mode(WIFI_AP);
+        ntripState="OFF";
+    }
+    if (!startAccessPoint()) Serial.println("ERR WIFI_AP_AFTER_SOURCE");
 }
 static void restartNtrip(const char *reason) {
     ntripFailures++; ntripError=reason; ntripState="RECONNECTING";
@@ -91,12 +98,14 @@ static bool readField(const char *name,char *dest,size_t size,bool keepEmpty=fal
     return true;
 }
 static void setupNtrip() {
-    ntripWorkerReady=directNtrip.begin();
     Preferences p; p.begin("rover-ntrip",true);
     if(p.getBytesLength("config")==sizeof(ntripConfig)) p.getBytes("config",&ntripConfig,sizeof(ntripConfig));
     // Always bound persisted strings before validating/using them.
     ntripConfig.ssid[32]=ntripConfig.wifiPass[63]=ntripConfig.host[127]=ntripConfig.mount[127]=ntripConfig.user[95]=ntripConfig.password[95]=0;
-    if(p.getBool("direct",false) && ntripWorkerReady && configValid(ntripConfig)) corrections.source=CorrectionInput::NTRIP;
+    if(p.getBool("direct",false) && configValid(ntripConfig)) {
+        ntripWorkerReady=directNtrip.begin();
+        if(ntripWorkerReady) corrections.source=CorrectionInput::NTRIP;
+    }
     p.end(); applyCorrectionSource();
     web.on("/corrections/config",HTTP_GET,[] {
         String s="{\"source\":"+jsonText(corrections.name());
@@ -126,7 +135,9 @@ static void setupNtrip() {
     web.on("/corrections/source",HTTP_POST,[] {
         String source=web.arg("source");
         if(source!="LORA" && source!="NTRIP") { web.send(400,"text/plain","Origem invalida."); return; }
-        if(source=="NTRIP" && (!ntripWorkerReady || !configValid(ntripConfig))) { web.send(409,"text/plain","Salve uma configuracao NTRIP valida primeiro; confira disponibilidade do cliente."); return; }
+        if(source=="NTRIP" && !configValid(ntripConfig)) { web.send(409,"text/plain","Salve uma configuracao NTRIP valida primeiro."); return; }
+        if(source=="NTRIP" && !ntripWorkerReady) ntripWorkerReady=directNtrip.begin();
+        if(source=="NTRIP" && !ntripWorkerReady) { web.send(503,"text/plain","Memoria insuficiente para iniciar o cliente NTRIP."); return; }
         if(radioControl.machine.pending()) { web.send(409,"text/plain","Aguarde a negociacao do perfil de radio."); return; }
         auto previous=corrections.source; corrections.source=source=="NTRIP"?CorrectionInput::NTRIP:CorrectionInput::LORA;
         if(!saveNtripConfig()) { corrections.source=previous; web.send(500,"text/plain","Falha ao salvar origem."); return; }

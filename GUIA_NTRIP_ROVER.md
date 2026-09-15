@@ -42,6 +42,17 @@ não são devolvidas no status, nem incluídas no CSV ou eventos do caderno.
 A senha do AP RTK-ROVER é independente da senha do Wi-Fi com internet; ainda
 pode ser alterada por USB com `WIFI_PASS=nova_senha`, de 8 a 63 caracteres.
 
+Se a página não abrir, teste primeiro **http://192.168.4.1/ping**. A resposta
+esperada é `RTK-ROVER OK`. Esqueça no celular uma associação antiga da rede
+RTK-ROVER e conecte novamente com `12345678` se o telefone tiver guardado outra
+senha. No modo LoRa, o ESP inicia o ponto de acesso no canal 1 e desativa a
+economia de energia do Wi-Fi para evitar que DHCP e HTTP parem durante o teste.
+
+O Bluetooth clássico aparece como **RTK-ROVER** e usa o PIN **1234** do próprio
+pareamento Bluetooth. Esse PIN não é a antiga `pairKey` dos comandos pelo rádio,
+que foi removida. O Bluetooth fornece somente as sentenças NMEA; toda a
+configuração e o relatório ficam na página Wi-Fi.
+
 ## Comparação LoRa × NTRIP
 
 Use o mesmo ponto, antena GNSS, caster, mountpoint e conjunto de mensagens
@@ -101,10 +112,15 @@ O texto do erro fica na telemetria; o cliente continua tentando.
 Cliente NTRIP por TCP sem TLS, com autenticação Basic quando há usuário,
 requisição HTTP/1.0 e leitura incremental de respostas ICY/HTTP, incluindo
 transferência HTTP chunked. Não há descoberta automática de mountpoints.
-DNS/conexão/leitura/envio GGA usam uma tarefa FreeRTOS separada. A fila de
-transporte é limitada a 12 blocos de 512 bytes; dados com mais de 500 ms na
+DNS/conexão/leitura/envio GGA usam uma tarefa FreeRTOS separada, iniciada apenas
+quando o modo NTRIP é utilizado. A fila de transporte é limitada a 6 blocos de
+512 bytes; dados com mais de 500 ms na
 fila são descartados e a conexão reiniciada. Somente frames RTCM completos
 com CRC24Q válido são encaminhados ao GNSS.
+
+A rota de estado envia os 136 valores de telemetria em formato compacto e o
+JavaScript da página restaura os nomes antes de exibir ou gravar. Assim, o CSV
+mantém todas as colunas e o ESP usa menos memória durante cada atualização.
 
 Referências do protocolo e da combinação AP/STA:
 [BKG NTRIP](https://igs.bkg.bund.de/ntrip/about) e

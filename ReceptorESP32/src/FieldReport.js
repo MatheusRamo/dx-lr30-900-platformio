@@ -3,6 +3,31 @@
   'use strict';
   const finite = v => typeof v === 'number' && Number.isFinite(v);
   const uid = () => Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12);
+  const REPORT_FIELDS = [
+    'schema_version', 'rover_id', 'rover_boot', 'rover_uptime_ms', 'correction_source', 'correction_session', 'correction_source_elapsed_ms', 'radio_corrections_enabled',
+    'rover_ntrip_state', 'rover_ntrip_error', 'rover_ntrip_http_status', 'rover_ntrip_worker_ready', 'rover_ntrip_host', 'rover_ntrip_port', 'rover_ntrip_mountpoint',
+    'rover_ntrip_gga_enabled', 'rover_ntrip_body_bytes', 'rover_ntrip_rate_bps', 'rover_ntrip_attempts', 'rover_ntrip_failures', 'rover_ntrip_queue_stale_drops',
+    'rover_ntrip_gga_sent', 'rover_ntrip_data_age_ms', 'rover_ntrip_gga_age_ms', 'rover_wifi_connected', 'rover_wifi_status', 'rover_wifi_rssi_dbm', 'rover_wifi_ip',
+    'gga_sequence', 'gga_age_ms', 'gnss_fresh', 'gnss_utc_hhmmss', 'gnss_date_ddmmyy', 'rmc_age_ms', 'fix_quality', 'fix_state', 'latitude_deg', 'longitude_deg',
+    'altitude_msl_m', 'geoid_separation_m', 'altitude_ellipsoid_m', 'satellites_used', 'hdop', 'pdop', 'vdop', 'gsa_age_ms', 'correction_age_gnss_s', 'rtcm_station_id',
+    'gst_same_epoch', 'gst_age_ms', 'gst_utc_hhmmss', 'precision_source', 'sigma_lat_m', 'sigma_lon_m', 'sigma_alt_m', 'horizontal_rss_sigma_m', 'gst_rms_range_m',
+    'sigma_major_m', 'sigma_minor_m', 'ellipse_orientation_deg', 'speed_m_s', 'course_deg', 'profile_active', 'profile_active_id', 'profile_radio', 'profile_radio_id',
+    'radio_config_confirmed', 'base_profile_fresh', 'profile_pending', 'rescue', 'profile_result', 'frequency_hz', 'bandwidth_hz', 'spreading_factor', 'coding_rate',
+    'preamble_symbols', 'power_dbm', 'radio_crc', 'radio_header', 'uart_baud', 'radio_packet_age_ms', 'rssi_rtcm_dbm', 'snr_rtcm_db', 'radio_packets', 'radio_lost',
+    'radio_loss_pct', 'radio_duplicates', 'radio_invalid', 'rtcm_frames', 'rtcm_crc_ok', 'rtcm_crc_errors', 'rtcm_bytes', 'rtcm_rate_bps', 'rtcm_age_ms',
+    'rtcm_max_completed_gap_ms', 'last_rtcm_type', 'gnss_written_bytes', 'uart_crc_errors', 'uart_malformed', 'uart_partial_timeouts', 'control_tx_ok', 'control_tx_errors',
+    'control_config_errors', 'control_auth_errors', 'nmea_drops', 'free_heap_bytes', 'largest_free_heap_block_bytes', 'wifi_clients', 'wifi_ap_ready', 'wifi_ap_ip',
+    'wifi_ap_channel', 'bluetooth_ready', 'bluetooth_connected', 'base_telemetry_age_ms', 'base_boot', 'rssi_control_dbm', 'snr_control_db', 'base_uptime_ms',
+    'base_ntrip_rate_bps', 'base_radio_rate_bps', 'base_queue_messages', 'base_queue_drops', 'base_stale_drops', 'base_rtcm_valid', 'base_rtcm_crc_errors',
+    'base_rtcm_filtered', 'base_tx_ok', 'base_tx_errors', 'base_config_errors', 'base_auth_errors', 'base_wifi_rssi_dbm', 'base_ntrip_state', 'nmea_gga', 'nmea_gst', 'nmea_gsa', 'nmea_rmc'
+  ];
+  function inflateSnapshot(snapshot) {
+    if (!snapshot || !Array.isArray(snapshot.report_values)) return snapshot;
+    if (snapshot.report_values.length !== REPORT_FIELDS.length) throw new Error('Telemetria incompatível com esta página');
+    snapshot.report = Object.fromEntries(REPORT_FIELDS.map((key, index) => [key, snapshot.report_values[index]]));
+    delete snapshot.report_values;
+    return snapshot;
+  }
   function distance(lat1, lon1, lat2, lon2) {
     if (![lat1, lon1, lat2, lon2].every(finite) || Math.abs(lat1) > 90 || Math.abs(lat2) > 90 || Math.abs(lon1) > 180 || Math.abs(lon2) > 180) return null;
     const rad = Math.PI / 180, dlat = (lat2 - lat1) * rad, dlon = (lon2 - lon1) * rad;
@@ -69,7 +94,7 @@
     }
     return test;
   }
-  const api = { distance, csvCell, makeRow, ageSnapshot, updateTest, META };
+  const api = { distance, csvCell, makeRow, ageSnapshot, updateTest, inflateSnapshot, REPORT_FIELDS, META };
   if (typeof module !== 'undefined' && module.exports) { module.exports = api; return; }
   root.FieldReport = api;
   const $ = id => document.getElementById(id);
@@ -260,7 +285,7 @@
     let snapshot = null; const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 3000);
     try {
       const response = await fetch('/status', { cache: 'no-store', signal: controller.signal }); if (!response.ok) throw new Error('HTTP ' + response.status);
-      snapshot = await response.json(); if (!snapshot.report) throw new Error('Firmware sem telemetria de relatório'); snapshot.report.http_rtt_ms = Math.round(performance.now() - start); reportKeys = Object.keys(snapshot.report); latest = snapshot; lastSuccess = performance.now(); token = snapshot.token; render(snapshot);
+      snapshot = inflateSnapshot(await response.json()); if (!snapshot.report) throw new Error('Firmware sem telemetria de relatório'); snapshot.report.http_rtt_ms = Math.round(performance.now() - start); reportKeys = Object.keys(snapshot.report); latest = snapshot; lastSuccess = performance.now(); token = snapshot.token; render(snapshot);
     } catch (e) { latest = null; showPairs('status', [['Conexão', 'Sem resposta do rover; a lacuna será registrada.']]); renderButtons(); }
     finally { clearTimeout(timer); }
     try { await sample(snapshot, gap); } catch (e) { note('Coleta interrompida: ' + e.message); recording = false; test = null; renderButtons(); }

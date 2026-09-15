@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <esp_heap_caps.h>
 #include <Preferences.h>
 #include <BluetoothSerial.h>
 #include <Wire.h>
@@ -23,7 +24,7 @@ Lr30Link lr30(LoRaSerial);
 RadioControlLink radioControl(lr30);
 WebServer web(80);
 String apPassword;
-bool displayReady = false;
+bool displayReady = false, bluetoothReady = false, accessPointReady = false;
 uint32_t lastRtcmAt = 0, lastGgaAt = 0, lastGstAt = 0, lastGsaAt = 0, lastRmcAt = 0, lastRadioAt = 0;
 uint32_t roverBoot = 0, nmeaDrops = 0, maxRtcmGap = 0;
 uint16_t lastRtcmType = 0;
@@ -275,7 +276,10 @@ static void serviceUsb()
                 Serial.println("OK STATS_RESET");
             }
             else if (usbLine == "NET_INFO")
-                Serial.printf("Wi-Fi: RTK-ROVER\nSenha: %s\nhttp://192.168.4.1\n", apPassword.c_str());
+                Serial.printf("AP: %s, pronto=%d, IP=%s, canal=%u, clientes=%u, modo=%u\nSenha: %s\nHTTP: http://192.168.4.1/ e http://192.168.4.1/ping\nBluetooth: pronto=%d, nome=RTK-ROVER, PIN=1234, conectado=%d\nHeap livre=%u, maior bloco=%u\n",
+                              WiFi.softAPSSID().c_str(), accessPointReady, WiFi.softAPIP().toString().c_str(), WiFi.channel(),
+                              WiFi.softAPgetStationNum(), (unsigned)WiFi.getMode(), apPassword.c_str(), bluetoothReady, SerialBT.hasClient(),
+                              ESP.getFreeHeap(), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
             else if (usbLine.startsWith("WIFI_PASS="))
             {
                 String password = usbLine.substring(10);
@@ -319,13 +323,59 @@ static bool authorized()
 }
 static bool startAccessPoint()
 {
-    WiFi.softAPdisconnect(true);
-    delay(100);
-    return WiFi.softAP("RTK-ROVER", apPassword.c_str());
+    // The AP is kept alive while using LoRa and NTRIP. Repeatedly disabling it
+    // here made phones lose DHCP/HTTP during Wi-Fi mode transitions.
+    if (!(WiFi.getMode() & WIFI_MODE_AP))
+        WiFi.mode((wifi_mode_t)(WiFi.getMode() | WIFI_MODE_AP));
+    WiFi.setSleep(false);
+    accessPointReady = WiFi.softAP("RTK-ROVER", apPassword.c_str(), 1, 0, 4);
+    return accessPointReady;
 }
 static bool baseFresh() { return radioControl.machine.heardBase() && !radioControl.machine.rescue() && millis() - radioControl.machine.lastHeard() < 4000; }
 #include "TelemetryJson.h"
 #include "RoverNtripWeb.h"
+static bool sendWebAsset(const char *contentType, PGM_P content, size_t length)
+{
+    web.setContentLength(length);
+    web.sendHeader("Cache-Control", "no-store");
+    web.send(200, contentType, "");
+    WiFiClient client = web.client();
+    client.setNoDelay(true);
+    constexpr size_t CHUNK = 512;
+    for (size_t offset = 0; offset < length; offset += CHUNK)
+    {
+        const size_t count = min(CHUNK, length - offset);
+        if (!client.connected() || client.write_P(content + offset, count) != count)
+        {
+            Serial.printf("HTTP asset interrompido em %u/%u bytes\n", (unsigned)offset, (unsigned)length);
+            client.stop();
+            return false;
+        }
+        delay(2); // Let the Wi-Fi task ACK data before filling the socket buffer.
+    }
+    return true;
+}
+static bool sendWebText(const char *contentType, const String &content)
+{
+    web.setContentLength(content.length());
+    web.sendHeader("Cache-Control", "no-store");
+    web.send(200, contentType, "");
+    WiFiClient client = web.client();
+    client.setNoDelay(true);
+    constexpr size_t CHUNK = 512;
+    for (size_t offset = 0; offset < content.length(); offset += CHUNK)
+    {
+        const size_t count = min(CHUNK, content.length() - offset);
+        if (!client.connected() || client.write((const uint8_t *)content.c_str() + offset, count) != count)
+        {
+            Serial.printf("HTTP texto interrompido em %u/%u bytes\n", (unsigned)offset, (unsigned)content.length());
+            client.stop();
+            return false;
+        }
+        delay(2);
+    }
+    return true;
+}
 static void setupWeb()
 {
     Preferences p;
@@ -337,31 +387,39 @@ static void setupWeb()
         p.putString("password", apPassword);
     p.end();
     WiFi.persistent(false);
-    WiFi.mode(WIFI_AP_STA);
+    WiFi.mode(WIFI_AP);
     if (!startAccessPoint())
         Serial.println("ERR WIFI_AP");
     setupNtrip();
     web.on("/", HTTP_GET, []
-           { web.sendHeader("Cache-Control","no-store"); web.send_P(200, "text/html; charset=utf-8", FIELD_PAGE); });
+           { sendWebAsset("text/html; charset=utf-8", FIELD_PAGE, strlen_P(FIELD_PAGE)); });
+    web.on("/generate_204", HTTP_GET, []
+           { web.sendHeader("Location", "http://192.168.4.1/", true); web.send(302, "text/plain", ""); });
+    web.on("/hotspot-detect.html", HTTP_GET, []
+           { web.send(200, "text/html; charset=utf-8", "<!doctype html><meta charset=utf-8><title>RTK-ROVER</title><a href='http://192.168.4.1/'>Abrir configuracao RTK-ROVER</a>"); });
+    web.on("/connecttest.txt", HTTP_GET, []
+           { web.sendHeader("Location", "http://192.168.4.1/", true); web.send(302, "text/plain", ""); });
+    web.on("/ping", HTTP_GET, []
+           { web.send(200, "text/plain", "RTK-ROVER OK"); });
     web.on("/report.js", HTTP_GET, []
            {
         extern const uint8_t scriptStart[] asm("_binary_src_FieldReport_js_start");
-        web.sendHeader("Cache-Control","no-store");web.send_P(200,"application/javascript; charset=utf-8",(const char*)scriptStart); });
+        extern const uint8_t scriptEnd[] asm("_binary_src_FieldReport_js_end");
+        sendWebAsset("application/javascript; charset=utf-8",(const char*)scriptStart,(size_t)(scriptEnd-scriptStart-1)); });
     web.on("/status", HTTP_GET, []
            {
-        const auto&g=gnss.status();const auto&m=radioControl.machine;
-        String s="{\"source\":"+jsonText(corrections.name())+",\"token\":\"\",\"profiles\":[";
+        const auto&m=radioControl.machine;
+        String s;
+        if(!s.reserve(4096)){web.send(503,"text/plain","Memoria temporaria insuficiente; tente novamente.");return;}
+        s="{\"token\":\"\",\"profiles\":[";
         for(uint8_t i=0;i<RadioControl::PROFILE_COUNT;i++){if(i)s+=",";s+="\""+String(RadioControl::profiles[i].name)+"\"";}
-        s+="],\"active\":"+String(m.active())+",\"radio\":"+String(m.profile());
-        s+=",\"ready\":"+String(radioControl.ready()?"true":"false")+",\"paired\":true";
+        s+="],\"active\":"+String(m.active())+",\"paired\":true";
         s+=",\"baseFresh\":"+String(baseFresh()?"true":"false")+",\"pending\":"+String(m.pending()?"true":"false");
         s+=",\"state\":\""+String(m.pending()?"Negociando":m.rescue()?"Procurando base no resgate":m.result()==2?"Confirmada por LoRa":m.result()==3?"Prazo esgotado; confira o perfil da base":"Pronto")+"\"";
-        s+=",\"fix\":\""+String(lastGgaAt&&millis()-lastGgaAt<3000?GnssMonitor::fixText(g.quality):"GNSS sem dados recentes")+"\"";
-        s+=",\"rate\":"+String(stats.rtcmRate)+",\"rtcmAge\":"+String(lastRtcmAt?(long)(millis()-lastRtcmAt):-1L);
-        s+=",\"rssi\":"+String(stats.rssi)+",\"snr\":"+String(stats.snr)+",\"lost\":"+String(stats.lost);
-        s+=",\"diffAge\":"+String(isfinite(g.differentialAge)?g.differentialAge:-1.0f,1);
-        appendTelemetry(s);s+="}";
-        web.sendHeader("Cache-Control","no-store");web.send(200,"application/json",s); });
+        appendTelemetry(s,true);s+="}";
+        static bool sizeLogged=false;
+        if(!sizeLogged){Serial.printf("HTTP status compacto: %u bytes, heap=%u, maior bloco=%u\n",(unsigned)s.length(),ESP.getFreeHeap(),heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));sizeLogged=true;}
+        sendWebText("application/json",s); });
     web.on("/profile", HTTP_POST, []
            {if(!authorized())return;
         if(corrections.source!=CorrectionInput::LORA){web.send(409,"text/plain","Selecione LoRa para trocar o perfil do enlace.");return;}
@@ -371,8 +429,11 @@ static void setupWeb()
            { web.send(410, "text/plain", "Atualize a pagina: medicao e historico agora ficam no celular."); });
     web.on("/results.csv", HTTP_GET, []
            { web.send(410, "text/plain", "Exporte o CSV pelo botao da pagina; os registros ficam no celular."); });
+    web.onNotFound([]
+                   { web.sendHeader("Location", "http://192.168.4.1/", true); web.send(302, "text/plain", "Abra http://192.168.4.1/"); });
     web.begin();
-    Serial.println("Pagina de campo pronta; Wi-Fi protegido.");
+    Serial.printf("Pagina pronta: AP=%d SSID=%s IP=%s canal=%u clientes=%u\n", accessPointReady,
+                  WiFi.softAPSSID().c_str(), WiFi.softAPIP().toString().c_str(), WiFi.channel(), WiFi.softAPgetStationNum());
 }
 static void updateRate()
 {
@@ -396,7 +457,10 @@ void setup()
     GNSSSerial.setTxBufferSize(2048);
     LoRaSerial.begin(UART_BAUD, SERIAL_8N1, LORA_RX_PIN, LORA_TX_PIN);
     GNSSSerial.begin(UART_BAUD, SERIAL_8N1, GNSS_RX_PIN, GNSS_TX_PIN);
-    SerialBT.begin("RTK-ROVER");
+    bluetoothReady = SerialBT.begin("RTK-ROVER");
+    if (bluetoothReady)
+        SerialBT.setPin("1234");
+    Serial.printf("Bluetooth: %s, nome RTK-ROVER, PIN 1234\n", bluetoothReady ? "OK" : "ERRO");
     nmeaQueue = xQueueCreate(16, sizeof(NmeaLine));
     if (nmeaQueue)
         xTaskCreate(bluetoothWriter, "nmea-bt", 4096, nullptr, 1, nullptr);

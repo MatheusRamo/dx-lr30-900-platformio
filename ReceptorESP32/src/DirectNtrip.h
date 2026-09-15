@@ -17,8 +17,9 @@ public:
     struct Gga { uint32_t at=0; char text[192]{}; };
     uint32_t generation=0;
     bool begin() {
-        commands=xQueueCreate(1,sizeof(Command)); events=xQueueCreate(12,sizeof(Event)); ggas=xQueueCreate(1,sizeof(Gga));
-        if (commands && events && ggas && xTaskCreate(runTask,"rover-ntrip",8192,this,1,nullptr)==pdPASS) return true;
+        if (commands && events && ggas) return true;
+        commands=xQueueCreate(1,sizeof(Command)); events=xQueueCreate(6,sizeof(Event)); ggas=xQueueCreate(1,sizeof(Gga));
+        if (commands && events && ggas && xTaskCreate(runTask,"rover-ntrip",6144,this,1,nullptr)==pdPASS) return true;
         if(commands)vQueueDelete(commands); if(events)vQueueDelete(events); if(ggas)vQueueDelete(ggas);
         commands=events=ggas=nullptr; return false;
     }
