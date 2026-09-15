@@ -29,16 +29,20 @@ static void applyCorrectionSource() {
     bool enabled=corrections.source==CorrectionInput::NTRIP;
     if (ntripWorkerReady) directNtrip.configure(ntripConfig,enabled);
     if(enabled) {
-        WiFi.mode(WIFI_AP_STA);
+        // In direct NTRIP mode Bluetooth is the control channel. Dropping the
+        // ESP access point avoids AP+STA coexistence pressure and keeps SPP
+        // available while the STA talks to the caster.
+        WiFi.mode(WIFI_STA);
         ntripState="WIFI_CONNECTING";
         WiFi.setAutoReconnect(true); WiFi.begin(ntripConfig.ssid,ntripConfig.wifiPass);
+        accessPointReady=false;
     } else {
         WiFi.setAutoReconnect(false);
         WiFi.disconnect(false,false);
         WiFi.mode(WIFI_AP);
         ntripState="OFF";
+        if (!startAccessPoint()) Serial.println("ERR WIFI_AP_AFTER_SOURCE");
     }
-    if (!startAccessPoint()) Serial.println("ERR WIFI_AP_AFTER_SOURCE");
 }
 static void restartNtrip(const char *reason) {
     ntripFailures++; ntripError=reason; ntripState="RECONNECTING";

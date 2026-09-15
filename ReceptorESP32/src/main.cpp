@@ -226,7 +226,7 @@ static void serviceGnss()
         {
             if (overflow)
                 nmeaDrops++;
-            else if (nmeaQueue && SerialBT.hasClient() && xQueueSend(nmeaQueue, &nmea, 0) != pdTRUE)
+            else if (corrections.source == CorrectionInput::LORA && nmeaQueue && SerialBT.hasClient() && xQueueSend(nmeaQueue, &nmea, 0) != pdTRUE)
                 nmeaDrops++;
             nmea.length = 0;
             overflow = false;
