@@ -7,6 +7,8 @@ static constexpr uint16_t TEST_NTRIP_PORT = 2101;
 static constexpr const char *TEST_NTRIP_MOUNT = "AUTO";
 static constexpr const char *TEST_NTRIP_USER = "geofmath";
 static constexpr const char *TEST_NTRIP_PASSWORD = "12345678";
+static constexpr const char *TEST_NTRIP_WIFI_SSID = "RURALTECH";
+static constexpr const char *TEST_NTRIP_WIFI_PASSWORD = "Rural1984";
 
 static bool configValid(const RoverNtripConfig &c) {
     if (!*c.ssid || !*c.host || !*c.mount || !c.port) return false;
@@ -111,7 +113,7 @@ static bool readField(const char *name,char *dest,size_t size,bool keepEmpty=fal
 static void setupNtrip() {
     Preferences p; p.begin("rover-ntrip",true);
     const bool stored = p.getBytesLength("config")==sizeof(ntripConfig);
-    const bool firstTestBoot = !p.getBool("test_defaults_v1", false);
+    const bool firstTestBoot = !p.getBool("test_defaults_v2", false);
     const bool storedDirect = p.getBool("direct", false);
     if(stored) p.getBytes("config",&ntripConfig,sizeof(ntripConfig));
     // Always bound persisted strings before validating/using them.
@@ -122,7 +124,9 @@ static void setupNtrip() {
         strlcpy(ntripConfig.mount, TEST_NTRIP_MOUNT, sizeof(ntripConfig.mount));
         strlcpy(ntripConfig.user, TEST_NTRIP_USER, sizeof(ntripConfig.user));
         strlcpy(ntripConfig.password, TEST_NTRIP_PASSWORD, sizeof(ntripConfig.password));
-        Serial.println("NTRIP: defaults de teste carregados; configure SSID Wi-Fi via Bluetooth.");
+        strlcpy(ntripConfig.ssid, TEST_NTRIP_WIFI_SSID, sizeof(ntripConfig.ssid));
+        strlcpy(ntripConfig.wifiPass, TEST_NTRIP_WIFI_PASSWORD, sizeof(ntripConfig.wifiPass));
+        Serial.println("NTRIP: defaults de teste carregados; MODE=2 conecta ao Wi-Fi RURALTECH.");
     }
     p.end();
     if(firstTestBoot) {
@@ -133,7 +137,7 @@ static void setupNtrip() {
         saveNtripConfig();
         corrections.source = previous;
         Preferences mark;
-        if(mark.begin("rover-ntrip", false)) { mark.putBool("test_defaults_v1", true); mark.end(); }
+        if(mark.begin("rover-ntrip", false)) { mark.putBool("test_defaults_v2", true); mark.end(); }
     }
     if(!firstTestBoot && storedDirect && configValid(ntripConfig)) {
         ntripWorkerReady=directNtrip.begin();
