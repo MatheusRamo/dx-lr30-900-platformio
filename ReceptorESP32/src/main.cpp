@@ -226,8 +226,18 @@ static void serviceGnss()
         {
             if (overflow)
                 nmeaDrops++;
-            else if (corrections.source == CorrectionInput::LORA && nmeaQueue && SerialBT.hasClient() && xQueueSend(nmeaQueue, &nmea, 0) != pdTRUE)
-                nmeaDrops++;
+            else if (nmeaQueue && SerialBT.hasClient())
+            {
+                // SW Maps needs a steady position stream. In NTRIP mode keep
+                // SPP light by sending only the 1 Hz GGA/RMC pair; LoRa mode
+                // preserves the complete NMEA stream for diagnostics.
+                const bool mappingSentence = nmea.length >= 6 &&
+                    ((nmea.data[3] == 'G' && nmea.data[4] == 'G' && nmea.data[5] == 'A') ||
+                     (nmea.data[3] == 'R' && nmea.data[4] == 'M' && nmea.data[5] == 'C'));
+                if (corrections.source == CorrectionInput::LORA || mappingSentence)
+                    if (xQueueSend(nmeaQueue, &nmea, 0) != pdTRUE)
+                        nmeaDrops++;
+            }
             nmea.length = 0;
             overflow = false;
         }
